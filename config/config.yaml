@@ -1,0 +1,319 @@
+# UFC Master Pipeline - Main Configuration
+# All paths, parameters, and settings in one place
+
+# Project Information
+project:
+  name: "UFC Master Pipeline"
+  version: "1.0.0"
+  description: "World's leading UFC fight prediction system"
+
+# Paths Configuration
+paths:
+  # Data directories
+  data_root: "D:/Codex/UFC-Master-Pipeline/data"
+  raw_data: "D:/Codex/UFC-Master-Pipeline/data/raw"
+  silver_data: "D:/Codex/UFC-Master-Pipeline/data/silver"
+  gold_data: "D:/Codex/UFC-Master-Pipeline/data/gold"
+
+  # Model artifacts
+  models_dir: "D:/Codex/UFC-Master-Pipeline/models"
+  artifacts_dir: "D:/Codex/UFC-Master-Pipeline/artifacts"
+
+  # Results & logs
+  results_dir: "D:/Codex/UFC-Master-Pipeline/results"
+  logs_dir: "D:/Codex/UFC-Master-Pipeline/logs"
+
+  # MLflow
+  mlflow_tracking_uri: "file:///D:/Codex/UFC-Master-Pipeline/mlruns"
+
+  # Primary datasets
+  golden_dataset: "D:/Codex/FightIQ/data/UFC_full_data_golden.csv"
+  silver_dataset: "D:/Codex/FightIQ/data/UFC_full_data_silver.csv"
+  odds_dataset: "D:/Codex/FightIQ/data/UFC_betting_odds.csv"
+  rankings_dataset: "D:/Codex/FightIQ/data/UFC_rankings_history.csv"
+
+# Data Splits (Temporal)
+splits:
+  # Training: All fights before 2023
+  train_end_date: "2022-12-31"
+
+  # Validation: 2023-2024 (for hyperparameter tuning)
+  val_start_date: "2023-01-01"
+  val_end_date: "2024-12-31"
+
+  # Test: 2025+ (ONE-TIME holdout, never touched until final eval)
+  test_start_date: "2025-01-01"
+
+  # Date column
+  date_column: "event_date"
+
+  # CRITICAL: Never shuffle time-series data
+  shuffle: false
+  stratify: false
+
+# Feature Engineering
+features:
+  # Leakage prevention (CRITICAL)
+  exclude_current_fight_stats: true
+  exclude_patterns:
+    - ".*_r\\d+_.*"          # Round-by-round stats
+    - ".*finish_round.*"      # Finish round
+    - ".*finish_time.*"       # Finish time
+    - ".*total_strikes.*"     # Total strikes (all rounds)
+    - ".*total_.*_att.*"      # Total attempts
+    - ".*total_.*_succ.*"     # Total successes
+    - ".*fight_duration.*"    # Fight duration
+    - ".*num_rounds.*"        # Rounds fought
+    - ".*result.*"            # Result columns
+    - ".*winner.*"            # Winner (target)
+    - ".*method.*"            # Finish method
+
+  # Imputation strategies
+  imputation:
+    rolling_stats: "zero"           # Debut fighters have no history
+    physical_stats: "median"        # Height, reach, weight, age
+    career_stats: "median"          # Win rate, striking stats, etc.
+    odds: "median"                  # Betting odds
+    create_indicators: true         # Binary missingness flags
+
+  # Feature selection
+  correlation_threshold: 0.90  # Remove features with >90% correlation
+  variance_threshold: 0.01     # Remove near-zero variance features
+
+# Model Configuration
+model:
+  # Base models
+  base_models:
+    - xgboost
+    - lightgbm
+    # - catboost  # Optional, slower training
+
+  # Ensemble settings
+  ensemble:
+    enabled: true
+    method: "stacking"          # Out-of-fold stacking
+    n_folds: 5                  # TimeSeriesSplit folds
+    meta_learner: "logistic"    # Logistic Regression meta-model
+
+  # Calibration
+  calibration:
+    enabled: true
+    method: "platt"             # Options: platt, isotonic
+    per_weight_class: true      # Separate calibration per division
+
+  # XGBoost hyperparameters (tuned with Optuna)
+  xgboost:
+    objective: "binary:logistic"
+    eval_metric: "logloss"
+    max_depth: 5
+    learning_rate: 0.023
+    subsample: 0.89
+    colsample_bytree: 0.8
+    min_child_weight: 3
+    gamma: 0.1
+    reg_alpha: 0.05
+    reg_lambda: 1.0
+    n_estimators: 300
+    random_state: 42
+    tree_method: "hist"
+    verbosity: 0
+
+  # LightGBM hyperparameters (tuned with Optuna)
+  lightgbm:
+    objective: "binary"
+    metric: "binary_logloss"
+    num_leaves: 31
+    learning_rate: 0.02
+    max_depth: 6
+    feature_fraction: 0.8
+    bagging_fraction: 0.8
+    bagging_freq: 5
+    min_data_in_leaf: 20
+    lambda_l1: 0.1
+    lambda_l2: 1.0
+    n_estimators: 300
+    random_state: 42
+    verbose: -1
+
+  # CatBoost hyperparameters
+  catboost:
+    loss_function: "Logloss"
+    depth: 6
+    learning_rate: 0.03
+    l2_leaf_reg: 3.0
+    iterations: 300
+    random_seed: 42
+    verbose: false
+
+# Hyperparameter Optimization (Optuna)
+optimization:
+  enabled: true
+  n_trials: 500               # Number of Optuna trials
+  timeout: 7200               # Max 2 hours per optimization
+  n_jobs: -1                  # Use all CPU cores
+  sampler: "TPE"              # Tree-structured Parzen Estimator
+  pruner: "MedianPruner"      # Early stopping for bad trials
+
+  # Search spaces
+  xgboost_search_space:
+    max_depth: [3, 4, 5, 6, 7, 8]
+    learning_rate: [0.01, 0.3]
+    subsample: [0.6, 1.0]
+    colsample_bytree: [0.6, 1.0]
+    min_child_weight: [1, 10]
+    gamma: [0.0, 0.5]
+    reg_alpha: [0.0, 1.0]
+    reg_lambda: [0.0, 2.0]
+
+  lightgbm_search_space:
+    num_leaves: [20, 60]
+    learning_rate: [0.01, 0.3]
+    max_depth: [3, 8]
+    feature_fraction: [0.6, 1.0]
+    bagging_fraction: [0.6, 1.0]
+    min_data_in_leaf: [10, 50]
+    lambda_l1: [0.0, 1.0]
+    lambda_l2: [0.0, 2.0]
+
+# Betting Strategy (Kelly Criterion)
+betting:
+  # Bankroll management
+  bankroll: 1000.0             # Initial bankroll (£)
+  compound_weekly: true        # Reinvest profits
+
+  # Kelly Criterion parameters
+  kelly_fraction_cap: 0.05     # Max 5% of bankroll per bet
+  kelly_multiplier: 0.5        # Fractional Kelly (0.5 = half Kelly)
+  min_edge: 0.02               # Only bet if expected value > 2%
+  probability_threshold: 0.55  # Only bet if P(win) > 55%
+
+  # Event-level constraints
+  max_bets_per_event: 3        # Max 3 bets per fight card
+  max_exposure_per_event: 0.20 # Max 20% of bankroll per event
+
+  # Risk management
+  max_drawdown_stop: 0.30      # Pause betting if -30% drawdown
+  remove_vig: true             # Use vig-free implied probabilities
+
+# Backtesting (Walk-Forward)
+backtesting:
+  # Walk-forward configuration
+  initial_train_years: 10      # Initial training window (years)
+  test_window_months: 3        # Rolling test window (months)
+  step_size_months: 1          # Step forward by 1 month
+
+  # Calibration strategy
+  calibration_split: 0.20      # 20% of train for calibration
+  per_fold_calibration: true   # Re-calibrate each fold
+
+  # Metrics to track
+  metrics:
+    - "total_roi"
+    - "annual_roi"
+    - "sharpe_ratio"
+    - "hit_rate"
+    - "max_drawdown"
+    - "total_bets"
+    - "avg_bet_size"
+    - "win_rate_by_odds_range"
+
+# Multi-Task Learning
+multitask:
+  enabled: false               # Enable after baseline models work
+  tasks:
+    - name: "winner"
+      type: "binary"
+      target_col: "winner_encoded"
+    - name: "method"
+      type: "multiclass"
+      target_col: "result"
+      classes: ["KO/TKO", "Submission", "Decision", "Other"]
+    - name: "round"
+      type: "ordinal"
+      target_col: "finish_round"
+      classes: [1, 2, 3, 4, 5, "Decision"]
+
+# Validation & Testing
+validation:
+  # Great Expectations
+  ge_enabled: true
+  ge_suites_dir: "D:/Codex/UFC-Master-Pipeline/src/validation/ge_suites"
+
+  # Leakage detection
+  leakage_tests:
+    - "target_leakage"
+    - "temporal_leakage"
+    - "fight_overlap"
+    - "rolling_stats_validation"
+    - "odds_timing"
+
+  # Data quality checks
+  quality_checks:
+    - "no_future_dates"
+    - "no_impossible_values"
+    - "no_missing_targets"
+    - "odds_sanity_check"
+    - "temporal_ordering"
+
+# Logging
+logging:
+  level: "INFO"                # DEBUG, INFO, WARNING, ERROR
+  format: "{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}"
+  log_to_file: true
+  log_file: "D:/Codex/UFC-Master-Pipeline/logs/ufc_pipeline.log"
+  rotation: "10 MB"            # Rotate logs at 10 MB
+  retention: "1 month"         # Keep logs for 1 month
+
+# MLflow Experiment Tracking
+mlflow:
+  experiment_name: "UFC_Master_Pipeline"
+  tracking_uri: "file:///D:/Codex/UFC-Master-Pipeline/mlruns"
+  artifact_location: "D:/Codex/UFC-Master-Pipeline/mlruns"
+
+  # Auto-logging
+  autolog:
+    xgboost: true
+    lightgbm: true
+    sklearn: true
+
+  # Tags
+  default_tags:
+    project: "UFC Master Pipeline"
+    version: "1.0.0"
+
+# Weekly Automation
+automation:
+  enabled: false               # Enable after manual testing
+  schedule: "Sunday 02:00"     # Run every Sunday at 2 AM
+
+  # Pipeline steps
+  steps:
+    - name: "ingest_data"
+      enabled: true
+    - name: "validate_data"
+      enabled: true
+    - name: "build_features"
+      enabled: true
+    - name: "retrain_models"
+      enabled: true
+      frequency: "monthly"     # Only retrain on first Sunday
+    - name: "generate_predictions"
+      enabled: true
+    - name: "send_notifications"
+      enabled: true
+
+  # Notifications
+  notifications:
+    slack:
+      enabled: false
+      webhook_url: ""          # Set in .env file
+    email:
+      enabled: false
+      recipients: []
+
+# Random Seeds (for reproducibility)
+random_state: 42
+
+# Performance
+n_jobs: -1                     # Use all CPU cores
+verbose: 1                     # Verbosity level

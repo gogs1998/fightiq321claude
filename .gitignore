@@ -19,22 +19,23 @@ ENV/
 *.swp
 *.swo
 
-# Data files (too large for git)
+# Raw data (too large - golden dataset from FightIQ)
 data/raw/
 data/silver/
 data/gold/
-*.csv
-*.parquet
 
-# Model files (too large)
-models/*.json
-models/*.txt
-models/*.pkl
+# Exclude large CSV files but keep predictions
+UFC_full_data_golden.csv
+UFC_full_data_silver.csv
+UFC_betting_odds.csv
+
+# MLflow runs
 mlruns/
 
 # Logs
 logs/
 *.log
+predictions_output.log
 
 # OS
 .DS_Store
@@ -42,9 +43,12 @@ Thumbs.db
 
 # Temporary
 *.tmp
-predictions_output.log
 
-# Keep these
+# Keep these important files
+!models/*.json
+!models/*.txt
+!models/*.pkl
+!predictions*.csv
 !README.md
 !requirements.txt
 !config/*.yaml

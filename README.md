@@ -28,7 +28,18 @@ Built with Claude Code - combines historical fight statistics with real-time bet
 
 ## 🚀 Quick Start
 
-### Installation
+### Option 1: Kaggle Notebook (Recommended for Beginners)
+
+**Run the complete pipeline in your browser - no setup required!**
+
+1. Go to Kaggle: [UFC Master Pipeline Notebook](https://www.kaggle.com/)
+2. Upload `UFC_Master_Pipeline_Production_System.ipynb`
+3. Add the FightIQ UFC dataset
+4. Click "Run All"
+
+See [KAGGLE_NOTEBOOK_GUIDE.md](KAGGLE_NOTEBOOK_GUIDE.md) for detailed instructions.
+
+### Option 2: Local Installation
 
 ```bash
 pip install -r requirements.txt
@@ -50,6 +61,8 @@ This will:
 
 ```
 UFC-Master-Pipeline/
+├── UFC_Master_Pipeline_Production_System.ipynb  # 📓 Kaggle notebook
+├── KAGGLE_NOTEBOOK_GUIDE.md                    # 📖 Notebook usage guide
 ├── config/
 │   └── config.yaml              # Central configuration
 ├── scripts/
@@ -63,9 +76,9 @@ UFC-Master-Pipeline/
 │   └── utils/
 │       └── config.py            # Configuration management
 └── models/
-    ├── xgboost_production.json
-    ├── lightgbm_production.txt
-    └── ensemble_production.pkl
+    ├── xgboost_production.json  # Pre-trained XGBoost (1.6MB)
+    ├── lightgbm_production.txt  # Pre-trained LightGBM (1.8MB)
+    └── ensemble_production.pkl  # Ensemble wrapper (47KB)
 ```
 
 ## 🎲 UFC 321 Predictions (Oct 25, 2025)

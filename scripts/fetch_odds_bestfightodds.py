@@ -7,6 +7,8 @@ Superior alternative to The Odds API:
 - 12+ bookmakers tracked
 - Free with no rate limits
 - Opening & closing odds + line movements
+
+UPDATED: Now uses Selenium for JavaScript-rendered content
 """
 
 import sys
@@ -24,6 +26,20 @@ from loguru import logger
 from fuzzywuzzy import fuzz, process
 from typing import Dict, List, Optional, Tuple
 
+# Selenium imports
+try:
+    from selenium import webdriver
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.chrome.service import Service
+    from webdriver_manager.chrome import ChromeDriverManager
+    SELENIUM_AVAILABLE = True
+except ImportError:
+    SELENIUM_AVAILABLE = False
+    logger.warning("Selenium not installed. Install with: pip install selenium webdriver-manager")
+
 
 class BestFightOddsScraper:
     """
@@ -34,11 +50,68 @@ class BestFightOddsScraper:
 
     BASE_URL = "https://www.bestfightodds.com"
 
-    def __init__(self):
-        self.session = requests.Session()
-        self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        })
+    def __init__(self, use_selenium=True, headless=True):
+        """
+        Initialize scraper
+
+        Args:
+            use_selenium: Use Selenium for JavaScript rendering (recommended)
+            headless: Run browser in headless mode (no GUI)
+        """
+        self.use_selenium = use_selenium and SELENIUM_AVAILABLE
+        self.headless = headless
+        self.driver = None
+
+        if self.use_selenium:
+            self._init_selenium()
+        else:
+            # Fallback to requests (may not work due to JavaScript)
+            self.session = requests.Session()
+            self.session.headers.update({
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            })
+
+    def _init_selenium(self):
+        """Initialize Selenium WebDriver"""
+        try:
+            chrome_options = Options()
+
+            if self.headless:
+                chrome_options.add_argument('--headless')
+
+            # Anti-detection options
+            chrome_options.add_argument('--disable-blink-features=AutomationControlled')
+            chrome_options.add_argument('--no-sandbox')
+            chrome_options.add_argument('--disable-dev-shm-usage')
+            chrome_options.add_argument('--disable-gpu')
+            chrome_options.add_argument('--window-size=1920,1080')
+            chrome_options.add_argument('user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+
+            # Suppress logging
+            chrome_options.add_experimental_option('excludeSwitches', ['enable-logging'])
+
+            # Initialize driver
+            service = Service(ChromeDriverManager().install())
+            self.driver = webdriver.Chrome(service=service, options=chrome_options)
+
+            logger.success("✓ Selenium WebDriver initialized successfully")
+
+        except Exception as e:
+            logger.error(f"Failed to initialize Selenium: {e}")
+            logger.info("Falling back to requests-based scraping...")
+            self.use_selenium = False
+            self.session = requests.Session()
+            self.session.headers.update({
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            })
+
+    def __del__(self):
+        """Cleanup Selenium driver"""
+        if self.driver:
+            try:
+                self.driver.quit()
+            except:
+                pass
 
     def _american_to_decimal(self, american_odds: str) -> float:
         """
@@ -71,6 +144,34 @@ class BestFightOddsScraper:
             logger.warning(f"Could not parse odds: {american_odds}")
             return np.nan
 
+    def _get_page_source(self, url: str) -> str:
+        """
+        Get page source using Selenium or requests
+
+        Args:
+            url: URL to fetch
+
+        Returns:
+            Page HTML source
+        """
+        if self.use_selenium and self.driver:
+            try:
+                self.driver.get(url)
+                # Wait for page to load
+                time.sleep(3)
+                return self.driver.page_source
+            except Exception as e:
+                logger.error(f"Selenium failed to fetch {url}: {e}")
+                return ""
+        else:
+            try:
+                response = self.session.get(url, timeout=30)
+                response.raise_for_status()
+                return response.text
+            except Exception as e:
+                logger.error(f"Requests failed to fetch {url}: {e}")
+                return ""
+
     def get_all_ufc_events(self) -> List[Dict]:
         """
         Get list of all UFC events from BestFightOdds
@@ -83,41 +184,74 @@ class BestFightOddsScraper:
         url = f"{self.BASE_URL}/events/ufc"
 
         try:
-            response = self.session.get(url, timeout=30)
-            response.raise_for_status()
-            soup = BeautifulSoup(response.content, 'html.parser')
+            page_source = self._get_page_source(url)
+            if not page_source:
+                return []
 
+            soup = BeautifulSoup(page_source, 'html.parser')
             events = []
 
-            # Find event table
-            event_rows = soup.find_all('tr', class_='event-row')
+            # Try multiple selectors for events
+            # Pattern 1: Event table rows
+            event_rows = soup.find_all('tr', class_=lambda x: x and 'event' in x.lower())
 
-            for row in event_rows:
-                try:
-                    # Extract event name and link
-                    event_link = row.find('a', class_='event-name')
-                    if not event_link:
+            if not event_rows:
+                # Pattern 2: Find all links that look like UFC events
+                all_links = soup.find_all('a', href=True)
+                for link in all_links:
+                    href = link.get('href', '')
+                    text = link.text.strip()
+                    if 'ufc' in text.lower() and ('/' in href or 'event' in href.lower()):
+                        events.append({
+                            'name': text,
+                            'url': href if href.startswith('http') else f"{self.BASE_URL}{href}",
+                            'date': None
+                        })
+
+            else:
+                for row in event_rows:
+                    try:
+                        # Extract event name and link
+                        event_link = row.find('a', href=True)
+                        if not event_link:
+                            continue
+
+                        event_name = event_link.text.strip()
+                        event_url = event_link.get('href')
+
+                        if not event_url.startswith('http'):
+                            event_url = f"{self.BASE_URL}{event_url}"
+
+                        # Try to extract date
+                        date_cells = row.find_all('td')
+                        event_date = None
+                        for cell in date_cells:
+                            cell_text = cell.text.strip()
+                            # Look for date patterns (e.g., "Jan 25, 2025")
+                            if re.search(r'\w+\s+\d{1,2},\s+\d{4}', cell_text):
+                                event_date = cell_text
+                                break
+
+                        events.append({
+                            'name': event_name,
+                            'url': event_url,
+                            'date': event_date
+                        })
+
+                    except Exception as e:
+                        logger.debug(f"Failed to parse event row: {e}")
                         continue
 
-                    event_name = event_link.text.strip()
-                    event_url = event_link.get('href')
+            # Remove duplicates
+            seen = set()
+            unique_events = []
+            for event in events:
+                if event['url'] not in seen:
+                    seen.add(event['url'])
+                    unique_events.append(event)
 
-                    # Extract date
-                    date_cell = row.find('td', class_='event-date')
-                    event_date = date_cell.text.strip() if date_cell else None
-
-                    events.append({
-                        'name': event_name,
-                        'url': event_url,
-                        'date': event_date
-                    })
-
-                except Exception as e:
-                    logger.debug(f"Failed to parse event row: {e}")
-                    continue
-
-            logger.success(f"✓ Found {len(events)} UFC events")
-            return events
+            logger.success(f"✓ Found {len(unique_events)} UFC events")
+            return unique_events
 
         except Exception as e:
             logger.error(f"Failed to fetch UFC events: {e}")
@@ -125,7 +259,7 @@ class BestFightOddsScraper:
 
     def scrape_event(self, event_identifier: str) -> pd.DataFrame:
         """
-        Scrape odds for a specific UFC event
+        Scrape odds for a specific UFC event using Selenium
 
         Args:
             event_identifier: Event name or URL slug (e.g., "UFC 321" or "ufc-321-aspinall-vs-gane")
@@ -142,63 +276,122 @@ class BestFightOddsScraper:
             url = f"{self.BASE_URL}/events/{event_identifier}"
         else:
             # Convert "UFC 321" to "ufc-321"
-            slug = event_identifier.lower().replace(' ', '-').replace(':', '')
+            slug = event_identifier.lower().replace(' ', '-').replace(':', '').replace('–', '-')
             url = f"{self.BASE_URL}/events/{slug}"
 
         try:
-            response = self.session.get(url, timeout=30)
-            response.raise_for_status()
-            soup = BeautifulSoup(response.content, 'html.parser')
+            page_source = self._get_page_source(url)
+            if not page_source:
+                return pd.DataFrame()
 
+            soup = BeautifulSoup(page_source, 'html.parser')
             fights = []
 
-            # Find fight rows
-            fight_rows = soup.find_all('div', class_='table-row')
+            # BestFightOdds uses a table structure for fight odds
+            # Each fight typically has:
+            # - Fighter names (often as links to fighter pages)
+            # - Odds from multiple bookmakers
+            # - Opening/closing lines
 
-            for row in fight_rows:
-                try:
-                    # Extract fighter names
-                    fighter_cells = row.find_all('span', class_='fighter-name')
+            # Pattern 1: Look for fighter links (most reliable)
+            fighter_links = soup.find_all('a', href=lambda x: x and '/fighters/' in str(x))
 
-                    if len(fighter_cells) < 2:
+            # Group fighters into pairs
+            fighter_pairs = []
+            for i in range(0, len(fighter_links), 2):
+                if i + 1 < len(fighter_links):
+                    fighter_pairs.append((
+                        fighter_links[i].text.strip(),
+                        fighter_links[i+1].text.strip()
+                    ))
+
+            if fighter_pairs:
+                logger.info(f"Found {len(fighter_pairs)} fights via fighter links")
+
+                # Extract odds - look for numbers that match American odds format
+                # Odds are typically displayed near fighter names
+                for fighter1, fighter2 in fighter_pairs:
+                    try:
+                        # Find odds values (American format: -150, +200, etc.)
+                        # BestFightOdds typically shows multiple bookmakers
+                        # We'll extract the first/most prominent odds
+
+                        # Look for odds patterns in the page source
+                        # American odds format: optional +/-, followed by digits
+                        odds_pattern = r'[+-]?\d{3,4}'
+
+                        # Search in a section around the fighter names
+                        # This is a simplified approach - may need refinement
+                        all_odds = re.findall(odds_pattern, page_source)
+
+                        if len(all_odds) >= 2:
+                            # Take the first two odds values as fighter1 and fighter2
+                            f1_odds_american = all_odds[0]
+                            f2_odds_american = all_odds[1]
+
+                            f1_odds = self._american_to_decimal(f1_odds_american)
+                            f2_odds = self._american_to_decimal(f2_odds_american)
+
+                            fights.append({
+                                'fighter1': fighter1,
+                                'fighter2': fighter2,
+                                'fighter1_odds': f1_odds,
+                                'fighter2_odds': f2_odds,
+                                'bookmaker': 'Consensus'
+                            })
+
+                    except Exception as e:
+                        logger.debug(f"Failed to extract odds for {fighter1} vs {fighter2}: {e}")
                         continue
 
-                    fighter1 = fighter_cells[0].text.strip()
-                    fighter2 = fighter_cells[1].text.strip()
+            # Pattern 2: Try table-based extraction if Pattern 1 didn't work
+            if not fights:
+                logger.info("Trying alternative parsing method...")
 
-                    # Extract odds (look for odds cells)
-                    odds_cells = row.find_all('span', class_='odds-value')
+                # Look for table rows or divs that might contain fight data
+                rows = soup.find_all(['tr', 'div'], class_=lambda x: x and ('fight' in str(x).lower() or 'match' in str(x).lower()))
 
-                    if len(odds_cells) >= 2:
-                        f1_odds_american = odds_cells[0].text.strip()
-                        f2_odds_american = odds_cells[1].text.strip()
+                for row in rows:
+                    try:
+                        text = row.get_text()
+                        # Look for patterns like "Fighter1 vs Fighter2 -150 +120"
+                        # This is a fallback and may not be as accurate
 
-                        # Convert to decimal
-                        f1_odds = self._american_to_decimal(f1_odds_american)
-                        f2_odds = self._american_to_decimal(f2_odds_american)
+                        # Extract any fighter names and odds from the row
+                        links = row.find_all('a', href=lambda x: x and '/fighters/' in str(x))
+                        if len(links) >= 2:
+                            fighter1 = links[0].text.strip()
+                            fighter2 = links[1].text.strip()
 
-                        # Extract bookmaker
-                        bookmaker_cell = row.find('span', class_='bookmaker-name')
-                        bookmaker = bookmaker_cell.text.strip() if bookmaker_cell else 'Unknown'
+                            # Find odds in this row
+                            odds_matches = re.findall(r'[+-]?\d{3,4}', text)
+                            if len(odds_matches) >= 2:
+                                f1_odds = self._american_to_decimal(odds_matches[0])
+                                f2_odds = self._american_to_decimal(odds_matches[1])
 
-                        fights.append({
-                            'fighter1': fighter1,
-                            'fighter2': fighter2,
-                            'fighter1_odds': f1_odds,
-                            'fighter2_odds': f2_odds,
-                            'bookmaker': bookmaker
-                        })
+                                fights.append({
+                                    'fighter1': fighter1,
+                                    'fighter2': fighter2,
+                                    'fighter1_odds': f1_odds,
+                                    'fighter2_odds': f2_odds,
+                                    'bookmaker': 'Consensus'
+                                })
 
-                except Exception as e:
-                    logger.debug(f"Failed to parse fight row: {e}")
-                    continue
+                    except Exception as e:
+                        logger.debug(f"Failed to parse row: {e}")
+                        continue
 
             df = pd.DataFrame(fights)
 
             if len(df) > 0:
-                logger.success(f"✓ Scraped {len(df)} odds entries for {event_identifier}")
+                logger.success(f"✓ Scraped {len(df)} fights with odds for {event_identifier}")
             else:
                 logger.warning(f"⚠️  No odds found for {event_identifier}")
+                logger.info(f"URL attempted: {url}")
+                logger.info("This may mean:")
+                logger.info("  1. Event hasn't been posted yet")
+                logger.info("  2. Event name/slug is incorrect")
+                logger.info("  3. Website structure has changed")
 
             return df
 
